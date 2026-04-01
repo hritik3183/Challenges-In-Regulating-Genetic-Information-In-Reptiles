@@ -1,0 +1,200 @@
+# Colab-ready Reptile Risk training pipeline
+# Paste this cell into Google Colab and run.
+
+# 1) Install dependencies if needed (uncomment if running first time)
+# !pip install -q scikit-learn pandas matplotlib seaborn joblib
+
+import os
+import io
+import datetime
+import joblib
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from google.colab import files
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+
+# ------------ Config ------------
+OUTPUT_DIR = "/content/reptile_ai_outputs"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Reference to the PDF you uploaded earlier (keeps provenance)
+PDF_REFERENCE_PATH = "/mnt/data/HRITIK VERMA AI (1).pdf"  # <--- your uploaded file path
+
+# ------------ Helpers ------------
+def generate_synthetic_dataset(n=200, seed=42):
+    np.random.seed(seed)
+    species_list = ["Lizard", "Iguana", "Python", "Crocodile", "Gecko", "Monitor"]
+    data = {
+        "Species": np.random.choice(species_list, n),
+        "Gene_Mutation_Score": np.round(np.random.uniform(0.05, 0.9, n), 3),
+        "Temperature_Tolerance": np.random.randint(26, 41, n),
+        "Population_Count": np.random.randint(30, 300, n),
+        "Habitat_Stability_Index": np.round(np.random.uniform(0.2, 0.95, n), 3),
+        "Predator_Threat_Level": np.round(np.random.uniform(0.05, 0.8, n), 3),
+    }
+    df = pd.DataFrame(data)
+    score = (
+        df["Gene_Mutation_Score"] * 0.45
+        + (1 - df["Habitat_Stability_Index"]) * 0.2
+        + df["Predator_Threat_Level"] * 0.25
+        + (300 - df["Population_Count"]) / 600
+    )
+    score = (score - score.min()) / (score.max() - score.min() + 1e-9)
+    labels = []
+    for s in score:
+        if s < 0.33:
+            labels.append("Low")
+        elif s < 0.66:
+            labels.append("Moderate")
+        else:
+            labels.append("High")
+    df["Risk_Level"] = labels
+    return df
+
+def preprocess(df):
+    df = df.copy()
+    df.dropna(inplace=True)
+    df.drop_duplicates(inplace=True)
+    if "Risk_Level" not in df.columns:
+        raise ValueError("CSV must contain a 'Risk_Level' column with values: Low / Moderate / High")
+    species_encoder = LabelEncoder()
+    if "Species" in df.columns:
+        df["Species_enc"] = species_encoder.fit_transform(df["Species"])
+        feature_cols = [c for c in df.columns if c not in ("Risk_Level", "Species")]
+    else:
+        feature_cols = [c for c in df.columns if c != "Risk_Level"]
+    label_encoder = LabelEncoder()
+    df["Risk_Level_enc"] = label_encoder.fit_transform(df["Risk_Level"])
+    y = df["Risk_Level_enc"]
+    X = df[feature_cols].copy()
+    numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+    scaler = StandardScaler()
+    X[numeric_cols] = scaler.fit_transform(X[numeric_cols])
+    return X, y, scaler, species_encoder, label_encoder, feature_cols
+
+def train_and_evaluate(X_train, y_train, X_test, y_test):
+    model = RandomForestClassifier(n_estimators=200, random_state=42, n_jobs=-1)
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_test)
+    acc = accuracy_score(y_test, y_pred)
+    cls_report = classification_report(y_test, y_pred, zero_division=0)
+    cm = confusion_matrix(y_test, y_pred)
+    cv_scores = cross_val_score(model, X_train, y_train, cv=5, scoring="accuracy", n_jobs=-1)
+    importances = model.feature_importances_ if hasattr(model, "feature_importances_") else None
+    metrics = {
+        "accuracy": acc,
+        "classification_report": cls_report,
+        "confusion_matrix": cm,
+        "cv_mean_accuracy": float(cv_scores.mean()),
+        "cv_std": float(cv_scores.std()),
+        "cv_scores": cv_scores.tolist(),
+        "feature_importances": importances
+    }
+    return model, y_pred, metrics
+
+def plot_confusion_matrix(cm, labels):
+    plt.figure(figsize=(5,4))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=labels, yticklabels=labels)
+    plt.xlabel("Predicted")
+    plt.ylabel("Actual")
+    plt.title("Confusion Matrix")
+    plt.show()
+
+def plot_feature_importances(importances, feature_names):
+    if importances is None:
+        print("No feature importances available.")
+        return
+    fi = pd.Series(importances, index=feature_names).sort_values(ascending=True)
+    plt.figure(figsize=(8, max(4, 0.25 * len(fi))))
+    fi.plot(kind="barh")
+    plt.title("Feature Importances")
+    plt.xlabel("Importance")
+    plt.show()
+
+# ------------ UI: choose dataset source ------------
+print("Choose dataset option:")
+print("  1) Upload a CSV from your computer (recommended in Colab).")
+print("  2) Use a sample synthetic dataset (quick demo).")
+choice = input("Enter 1 or 2 (default 1): ").strip() or "1"
+
+if choice == "1":
+    print("Please choose a CSV file to upload (file should contain 'Risk_Level' column).")
+    uploaded = files.upload()
+    if len(uploaded) == 0:
+        raise SystemExit("No file uploaded. Re-run the cell to try again.")
+    # Use the first uploaded file
+    fname = list(uploaded.keys())[0]
+    df = pd.read_csv(io.BytesIO(uploaded[fname]))
+    print(f"Loaded uploaded file: {fname}  (rows: {len(df)})")
+else:
+    print("Generating synthetic dataset (200 rows).")
+    df = generate_synthetic_dataset(n=200)
+    print(f"Synthetic data generated (rows: {len(df)}).")
+
+# Save raw copy for provenance
+timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+raw_path = os.path.join(OUTPUT_DIR, f"raw_dataset_{timestamp}.csv")
+df.to_csv(raw_path, index=False)
+print("Saved raw dataset copy to:", raw_path)
+print("Reference project PDF path (if available):", PDF_REFERENCE_PATH)
+
+# Preprocess
+X, y, scaler, species_encoder, label_encoder, feature_cols = preprocess(df)
+print("Preprocessing done. Feature columns used:", feature_cols)
+
+# Train-test split
+test_size = 0.2
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42, stratify=y)
+print(f"Train/test split: {len(X_train)} train rows, {len(X_test)} test rows.")
+
+# Train & evaluate
+print("Training RandomForest model...")
+model, y_pred, metrics = train_and_evaluate(X_train, y_train, X_test, y_test)
+print("Done training.")
+print(f"Test accuracy: {metrics['accuracy']:.4f}")
+print("Cross-validation mean accuracy:", metrics["cv_mean_accuracy"], "std:", metrics["cv_std"])
+print("Classification report:\n", metrics["classification_report"])
+
+# Show confusion matrix and feature importances inline
+labels_readable = label_encoder.inverse_transform([0,1,2]) if label_encoder is not None else ["Low","Moderate","High"]
+print("Confusion matrix:")
+plot_confusion_matrix(metrics["confusion_matrix"], labels_readable)
+print("Feature importances:")
+plot_feature_importances(metrics["feature_importances"], feature_cols)
+
+# Save model, predictions and report
+model_save_path = os.path.join(OUTPUT_DIR, f"rf_model_{timestamp}.joblib")
+joblib.dump({"model": model, "scaler": scaler, "species_encoder": species_encoder, "label_encoder": label_encoder, "feature_cols": feature_cols}, model_save_path)
+print("Saved model to:", model_save_path)
+
+pred_df = pd.DataFrame({"Actual_enc": y_test, "Predicted_enc": y_pred})
+pred_df["Actual"] = label_encoder.inverse_transform(pred_df["Actual_enc"].astype(int))
+pred_df["Predicted"] = label_encoder.inverse_transform(pred_df["Predicted_enc"].astype(int))
+pred_save_path = os.path.join(OUTPUT_DIR, f"predictions_{timestamp}.csv")
+pred_df.to_csv(pred_save_path, index=False)
+print("Saved predictions to:", pred_save_path)
+
+report_lines = [
+    f"Reference PDF: {PDF_REFERENCE_PATH}",
+    f"Timestamp: {timestamp}",
+    f"Rows: {len(df)}",
+    f"Accuracy: {metrics['accuracy']:.4f}",
+    f"CV mean accuracy: {metrics['cv_mean_accuracy']:.4f} (std {metrics['cv_std']:.4f})",
+    "",
+    "Classification report:",
+    metrics["classification_report"]
+]
+report_path = os.path.join(OUTPUT_DIR, f"training_report_{timestamp}.txt")
+with open(report_path, "w") as fh:
+    fh.write("\n".join(map(str, report_lines)))
+print("Saved report to:", report_path)
+
+print("\nAll outputs saved in:", OUTPUT_DIR)
+# Offer downloads
+print("You can download the output files from the left Files pane in Colab, or run:")
+print(f"  from google.colab import files\n  files.download('{pred_save_path}')  # example to download predictions")
